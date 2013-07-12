@@ -1,25 +1,74 @@
 # begin compatibility insanity
 
-# First we deal with vendor prefixes
-PeerConnection = window.PeerConnection or window.webkitPeerConnection00 or window.webkitRTCPeerConnection
-IceCandidate = window.RTCIceCandidate
-SessionDescription = window.RTCSessionDescription
+PeerConnection = window.mozRTCPeerConnection or window.PeerConnection or window.webkitPeerConnection00 or window.webkitRTCPeerConnection
+IceCandidate = window.mozRTCIceCandidate or window.RTCIceCandidate
+SessionDescription = window.mozRTCSessionDescription or window.RTCSessionDescription
 MediaStream = window.MediaStream or window.webkitMediaStream
-getUserMedia = navigator.getUserMedia or navigator.webkitGetUserMedia
-URL = window.URL or window.webkitURL
+getUserMedia = navigator.mozGetUserMedia or navigator.getUserMedia or navigator.webkitGetUserMedia or navigator.msGetUserMedia
+URL = window.URL or window.webkitURL or window.msURL or window.oURL
 
-# getUserMedia errors unless it is bound to the scope of navigator
 if getUserMedia?
   getUserMedia = getUserMedia.bind navigator
 
-# Very simple browser detection for chrome and FF
 browser = (if navigator.mozGetUserMedia then 'firefox' else 'chrome')
 supported = (PeerConnection? and getUserMedia?)
 
-processSDPOut = (sdp) -> return sdp
-processSDPIn = (sdp) -> return sdp
+extract = (str, reg) ->
+  match = str.match reg
+  return (if match? then match[1] else null)
 
-# Util for attaching a video stream to a DOM element
+replaceCodec = (line, codec) ->
+  els = line.split ' '
+  out = []
+  for el, idx in els
+    if idx is 3
+      out[idx++] = codec
+    if el isnt codec
+      out[idx++] = el
+
+  return out.join ' '
+
+removeCN = (lines, mLineIdx) ->
+  mLineEls = lines[mLineIdx].split ' '
+  for line, idx in lines when line?
+    payload = extract line, /a=rtpmap:(\d+) CN\/\d+/i
+    if payload?
+      cnPos = mLineEls.indexOf payload
+      if cnPos isnt -1
+        mLineEls.splice cnPos, 1
+      lines.splice idx, 1
+
+  lines[mLineIdx] = mLineEls.join ' '
+  return lines
+
+useOPUS = (sdp) ->
+  lines = sdp.split '\r\n'
+  [mLineIdx] = (idx for line,idx in lines when line.indexOf('m=audio') isnt -1)
+  return sdp unless mLineIdx?
+  for line, idx in lines when line.indexOf('opus/48000') isnt -1
+    payload = extract line, /:(\d+) opus\/48000/i
+    if payload?
+      lines[mLineIdx] = replaceCodec lines[mLineIdx], payload
+    break
+
+  lines = removeCN lines, mLineIdx
+
+  return lines.join '\r\n'
+
+processSDPOut = (sdp) ->
+  out = []
+  if browser is 'firefox'
+    addCrypto = "a=crypto:1 AES_CM_128_HMAC_SHA1_80 inline:BAADBAADBAADBAADBAADBAADBAADBAADBAADBAAD"
+    for line in sdp.split '\r\n'
+      out.push line
+      out.push addCrypto if line.indexOf('m=') is 0
+  else
+    for line in sdp.split '\r\n'
+      if line.indexOf("a=ice-options:google-ice") is -1
+        out.push line
+  return useOPUS out.join '\r\n'
+
+processSDPIn = (sdp) -> return sdp
 
 attachStream = (uri, el) ->
   if typeof el is "string"
@@ -32,52 +81,62 @@ attachStream = (uri, el) ->
     el.play()
   return el
 
-if supported # no need to shim
-  PeerConnConfig = 
-    iceServers: [
-      url: "stun:stun.l.google.com:19302"
-    ,
-      url: "stun:stun1.l.google.com:19302"
-    ,
-      url: "stun:stun2.l.google.com:19302"
-    ,
-      url: "stun:stun3.l.google.com:19302"
-    ,
-      url: "stun:stun4.l.google.com:19302"
-    ]
-  mediaConstraints =
-    optional: [
+shim = ->
+  return unless supported # no need to shim
+  if browser is 'firefox'
+    PeerConnConfig =
+      iceServers: [
+        url: "stun:23.21.150.121"
+      ]
+
+    mediaConstraints =
+      mandatory:
+        OfferToReceiveAudio: true
+        OfferToReceiveVideo: true
+        MozDontOfferDataChannel: true
+
+    MediaStream::getVideoTracks = -> []
+    MediaStream::getAudioTracks = -> []
+  else
+    PeerConnConfig = 
+      iceServers: [
+        url: "stun:stun.l.google.com:19302"
+      ]
+    mediaConstraints =
+      mandatory:
+        OfferToReceiveAudio: true
+        OfferToReceiveVideo: true
+      optional: [
         DtlsSrtpKeyAgreement: true
-      ,
-        RtpDataChannels: true
-    ]
+      ]
 
-  # API compat for older versions of chrome
-  unless MediaStream::getVideoTracks
-    MediaStream::getVideoTracks = -> @videoTracks
-    MediaStream::getAudioTracks = -> @audioTracks
+    unless MediaStream::getVideoTracks
+      MediaStream::getVideoTracks = -> @videoTracks
+      MediaStream::getAudioTracks = -> @audioTracks
 
-  unless PeerConnection::getLocalStreams
-    PeerConnection::getLocalStreams = -> @localStreams
-    PeerConnection::getRemoteStreams = -> @remoteStreams
-
-  # Not a shim - custom to holla. Allows you to do stream.pipe(element) which is more elegant than attachStream(streamUri, el)
+    unless PeerConnection::getLocalStreams
+      PeerConnection::getLocalStreams = -> @localStreams
+      PeerConnection::getRemoteStreams = -> @remoteStreams
+  
   MediaStream::pipe = (el) ->
     uri = URL.createObjectURL @
     attachStream uri, el
     return @
 
-module.exports =
-  PeerConnection: PeerConnection
-  IceCandidate: IceCandidate
-  SessionDescription: SessionDescription
-  MediaStream: MediaStream
-  getUserMedia: getUserMedia
-  URL: URL
-  attachStream: attachStream
-  processSDPIn: processSDPIn
-  processSDPOut: processSDPOut
-  PeerConnConfig: PeerConnConfig
-  browser: browser
-  supported: supported
-  constraints: mediaConstraints
+  out = 
+    PeerConnection: PeerConnection
+    IceCandidate: IceCandidate
+    SessionDescription: SessionDescription
+    MediaStream: MediaStream
+    getUserMedia: getUserMedia
+    URL: URL
+    attachStream: attachStream
+    processSDPIn: processSDPIn
+    processSDPOut: processSDPOut
+    PeerConnConfig: PeerConnConfig
+    browser: browser
+    supported: supported
+    constraints: mediaConstraints
+  return out
+
+module.exports = shim()
